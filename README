@@ -1,2 +1,2 @@
-POSIX sh driven music player wrapper and play-queue manager.
+CLI-based music player wrapper written in POSIX sh.
 Severely lacking in documentation so far.

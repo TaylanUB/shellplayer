@@ -1,8 +1,6 @@
 #!/bin/sh
 #
-# shellplayer: POSIX sh driven music player wrapper.
-#              Supplies functionality for add song, loop current, stop looping,
-#              etc..
+# shellplayer: CLI-based music player wrapper written in POSIX sh.
 #
 # Dependencies: POSIX environment
 #               Any media player (default is mplayer; edit the 'Play' function)
@@ -10,7 +8,7 @@
 # Note: For BSD compatibility, we don't pass the '--' argument to sed, and take
 #       care of lousy filenames through other means.
 #
-# Todo: Provide usage info.
+# TODO: Documentation.
 #
 
 # AUX FUNCTIONS
