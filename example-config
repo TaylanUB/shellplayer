@@ -1,0 +1,23 @@
+# Set SHELLPLAYER_CONFD in your ~/.profile
+# Then put this into $SHELLPLAYER_CONFD/config
+
+plsavedir=$SHELLPLAYER_CONFD/playlists
+delayfile=$SHELLPLAYER_CONFD/delay
+
+tmpdir=/tmp/$USER/shellplayer
+
+mplayerfifo=$tmpdir/mplayerfifo
+
+Play ()
+{
+    test -p "$mplayerfifo" || mkfifo "$mplayerfifo"
+    mplayer --novideo --no-consolecontrols --msglevel=all=3:demuxer=4 \
+        --input=file="$mplayerfifo" -- "$1" 2>&1
+}
+PausePlayer () { echo pause > "$mplayerfifo"; }
+ContPlayer () { echo pause > "$mplayerfifo"; }
+KillPlayer () { echo quit > "$mplayerfifo"; }
+
+# Set to non-null string to activate
+recursedirs=true
+#exitonerror=true

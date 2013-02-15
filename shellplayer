@@ -1,0 +1,549 @@
+#!/bin/sh
+#
+# shellplayer: POSIX sh driven music player wrapper.
+#              Supplies functionality for add song, loop current, stop looping,
+#              etc..
+#
+# Dependencies: POSIX environment
+#               Any media player (default is mplayer; edit the 'Play' function)
+#
+# Note: For BSD compatibility, we don't pass the '--' argument to sed, and take
+#       care of lousy filenames through other means.
+#
+# Todo: Provide usage info.
+#
+
+# AUX FUNCTIONS
+
+Ed () { "${VISUAL:-${EDITOR:-vi}}" -- "$1"; }
+
+Say ()
+    if [ "$cmd" ]
+    then printf '%s: %s: %s\n' "$progname" "$cmd" "$*"
+    else printf '%s: %s\n' "$progname" "$*"
+    fi >&2
+
+Complain ()
+    if [ "$cmd" ]
+    then printf '%s: %s: error: %s\n' "$progname" "$cmd" "$*"
+    else printf '%s: error: %s\n' "$progname" "$*"
+    fi >&2
+
+Usage ()
+    {
+    Say 'for now, read the code'
+    } >&2
+
+CleanUp ()
+    {
+    > "$cursongfile"
+    > "$pidfile"
+    > "$sleeppidfile"
+    }
+
+IsRunning ()
+    {
+    read -r pid < "$pidfile"
+    test "$pid"
+    }
+
+VerifyIsRunning ()
+    if ! IsRunning
+    then
+        Complain 'currently not running'
+        exit 1
+    fi
+
+VerifyIsNotRunning ()
+    if IsRunning
+    then
+        Complain 'already running'
+        exit 1
+    fi
+
+IsLooping ()
+    {
+    test -e "$looper"
+    }
+
+StartLooping ()
+    {
+    >> "$looper" || {
+        Complain "could not create file: $looper"
+        exit 1
+    }
+    }
+
+StopLooping ()
+    {
+    rm -f -- "$looper" || {
+        Complain "could not remove file: $looper"
+        exit 1
+    }
+    }
+
+LineOneEmpty ()
+    {
+    read -r line < "$1"
+    test -z "$line"
+    }
+
+VerifyNotEmpty ()
+    {
+    read _ < "$1" && return
+    Complain 'playlist is empty'
+    exit 1
+    }
+
+# Pass it 'N "$@"', where N is a number
+NeedArgs ()
+    {
+    if [ "$#" -le "$1" ]
+    then
+        Complain 'more arguments expected'
+        exit 1
+    fi
+    }
+
+Shuf ()
+    {
+    awk 'BEGIN{srand()} { print rand() "\t" $0 }' \
+    | sort -n | cut -f2-
+    }
+
+Sponge ()
+    {
+    cat > "$spongefile" && cat -- "$spongefile" > "$1"
+    }
+
+# In a function that takes an optional @playlist argument, execute
+# GetPL "$1" && shift
+# and $pl will be filled with the right value and the argument shifted if
+# necessary.
+GetPL ()
+    {
+    case $1 in
+    (@*)
+        pl="${1#@}"
+        case $pl in (*/*) ;; (*) pl=$plsavedir/$pl; esac
+        ;;
+    (*)
+        pl=$playlist
+        return 1
+    esac
+    case $pl in (/*) ;; (*) pl=./$pl; esac
+    }
+
+# / AUX FUNCTIONS
+
+
+umask 0022
+    
+# Config
+. "${SHELLPLAYER_CONFIG:-$HOME_CONFIG/shellplayer/config}" || exit
+
+# Ensure sane path-name.
+case $playlist in (/*) ;; (*) playlist=./$playlist; esac
+
+progname=shellplayer
+
+# Word used to terminate variable-length argument lists to commands
+# E.g. if it's "-": shellplayer add one.ogg two.ogg three.ogg - run
+argterm=-
+
+if [ $(find "$playlist" ! -user "$USER" 2> /dev/null | wc -l) -ne 0 ]
+then
+    Complain "your playlist is not owned by you: $playlist"
+    exit 1
+fi
+
+if [ $( (find "$playlist" -perm -g+w; find "$playlist" -perm -o+w
+            ) 2> /dev/null | wc -l) -ne 0 ]
+then
+    Complain "your playlist is writable by others: $playlist"
+    exit 1
+fi
+
+for dir in "$tmpdir" "$plsavedir"
+do
+    mkdir -p -- "$dir" || {
+        Complain "could not create directory: $dir"
+        exit 1
+    }
+done
+
+cursongfile=$tmpdir/current
+playlist=$tmpdir/playlist
+pidfile=$tmpdir/pid
+playerpidfile=$tmpdir/playerpid
+sleeppidfile=$tmpdir/sleeppid
+spongefile=$tmpdir/sponge
+looper=$tmpdir/looper
+nexter=$tmpdir/nexter
+
+for file in "$cursongfile" "$playlist" "$delayfile" "$pidfile" \
+            "$sleeppidfile" "$spongefile"
+do
+    >> "$file" || {
+        Complain "could not create file: $file"
+        exit 1
+    }
+done
+
+
+# MAIN
+
+if [ "$#" -eq 0 ]
+then
+    Complain "no command given; run '$progname help' for help"
+    exit 1
+fi
+
+# To allow the command-list to be dynamically changed,
+# we use this while loop instead of 'for cmd'
+while [ "$#" -gt 0 ] && { cmd=$1; shift; }
+do case $cmd in
+
+# Playlist commands
+# These commands check $1, and if it starts with a '@', take the
+# rest of the string as the name of a saved playlist, or if it
+# includes any '/', as a pathname, and apply subsequent operations
+# on that file instead of the current playlist
+# For filenames starting with '@', use "./@foobar"
+# Note: The uniq command checks for $2 instead of $1
+(i|in|inj|inject)
+    GetPL "$1" && shift
+    Sponge "$pl"
+    ;;
+(a|add)
+    # This command takes filenames as arguments
+    # If the user wants to chain other commands after this one,
+    # the filenames must be terminated with $argterm
+    GetPL "$1" && shift
+    for arg
+    do
+        shift
+        case $arg in
+        ($argterm)
+            break
+            ;;
+        ('')
+            echo
+            ;;
+        # Special playlist entry; for URIs and possibly more
+        ([%!]*)
+            printf '%s\n' "$arg"
+            ;;
+        (*)
+            case $arg in ([!/]*) arg=$(pwd)/$arg; esac
+            if [ -d "$arg" ]
+            then
+                [ "$recursedirs" ] && find "$arg" -type f | sort
+            else
+                printf '%s\n' "$arg"
+            fi
+        esac
+    done >> "$pl"
+    ;;
+(e|ed|edit)
+    GetPL "$1" && shift
+    Ed "$pl"
+    ;;
+(sh|shuf|shuffle)
+    GetPL "$1" && shift
+    VerifyNotEmpty "$pl"
+    { LineOneEmpty "$pl" && echo
+      sed _^/_!d "$pl" | Shuf
+    } | Sponge "$pl"
+    ;;
+(so|srt|sort)
+    GetPL "$1" && shift
+    VerifyNotEmpty "$pl"
+    # There might be a locale where empty lines don't come to top during sort
+    # So don't { echo; foobar; } | sort -o
+    { LineOneEmpty "$pl" && echo
+      sed _^/_!d "$pl" | sort
+    } | Sponge "$pl"
+    ;;
+(u|uniq)
+    NeedArgs 1 "$@"
+    subcmd=$1; shift
+    GetPL "$1" && shift
+    VerifyNotEmpty "$pl"
+    case $cmd in
+    # Only remove repeated entries
+    (r|re|repeats)
+        uniq -- "$pl" | Sponge "$pl"
+        ;;
+    # Sorted uniq, keeping first line if it's empty
+    # This destroys special entries
+    (s|so|sort)
+        { LineOneEmpty "$pl" && echo
+          sed _^/_!d "$pl" | sort -u
+        } | Sponge "$pl"
+        ;;
+    (*)
+        Complain "unrecognized subcommand: $subcmd"
+        exit 1
+    esac
+    unset subcmd
+    ;;
+(l|ls|lst|list)
+    GetPL "$1" && shift
+    if ! read _ < "$pl"
+    then
+        Say 'playlist is empty'
+    else
+        pr -tn -- "$pl"
+    fi
+    ;;
+(L|LS|LST|List)
+    GetPL "$1" && shift
+    cat -- "$pl"
+    ;;
+(cl|clr|clear)
+    GetPL "$1" && shift
+    > "$pl"
+    ;;
+
+# Playlist database commands
+# Names including any '/' are taken as pathnames
+# This means 'shellplayer remove ./foo' equals 'rm foo' and stuff
+(s|sa|sv|save)
+    NeedArgs 1 "$@"
+    name=$1; shift
+    VerifyNotEmpty "$playlist"
+    case $name in (*/*) ;; (*) name=$plsavedir/$name; esac
+    sed '1{/./!d;}' "$playlist" > "$name"
+    ;;
+(lo|load)
+    NeedArgs 1 "$@"
+    name=$1; shift
+    case $name in (*/*) ;; (*) name=$plsavedir/$name; esac
+    cat -- "$name" > "$playlist"
+    ;;
+(rm|rmv|rem|remove)
+    NeedArgs 1 "$@"
+    name=$1; shift
+    case $name in (*/*) ;; (*) name=$plsavedir/$name; esac
+    rm -- "$name"
+    ;;
+(mv|move)
+    NeedArgs 2 "$@"
+    old=$1; new=$2; shift 2
+    case $old in (*/*) ;; (*) old=$plsavedir/$old; esac
+    case $new in (*/*) ;; (*) new=$plsavedir/$new; esac
+    mv -- "$old" "$new"
+    ;;
+(pls|plists|playlists)
+    ls -- "$plsavedir"
+    ;;
+
+# Looping
+(lp|lon|lop|lopon|loop|loopon)
+    StartLooping
+    ;;
+(lf|lof|lopof|loopoff|nlp|nol|nolo|nolop|noloop)
+    StopLooping
+    ;;
+
+# Delay
+(d|delay)
+    # This behaviour is expected;
+    # this command cannot be chained without an argument
+    if [ "$#" -gt 0 ]
+    then printf '%s\n' "$1" > "$delayfile"; shift
+    else
+        read -r delay < "$delayfile"
+        Say "delay is $delay"
+    fi
+    ;;
+(D|Delay)
+    read -r delay < "$delayfile"
+    printf '%s\n' "$delay"
+    ;;
+
+# Print current song
+(c|cur|current)
+    read -r song < "$cursongfile"
+    if [ "$song" ]
+    then Say "playing: $song"
+    else Say 'not playing anything'
+    fi
+    ;;
+(C|Cur|Current)
+    cat -- "$cursongfile"
+    ;;
+
+# Start playing
+(r|run)
+    VerifyNotEmpty "$playlist"
+    VerifyIsNotRunning
+    (
+        # Close output to prevent blocking IO, reopen just in case
+        exec >&- 2>&-
+        exec > /dev/null 2>&1
+        unset prevsong song spid
+        trap CleanUp EXIT
+        trap '[ "$song" ] && KillPlayer; exit 1' INT TERM
+        while true
+        do
+            unset line
+            if IsLooping
+            then
+                if [ -e "$nexter" ] || ! IsRunning
+                then
+                    rm -f -- "$nexter"
+                    read -r line < "$playlist"
+                else
+                    printf '%s\n' "$prevsong" > "$cursongfile"
+                    song=$prevsong
+                fi
+            else
+                read -r line < "$playlist"
+            fi
+
+            if [ "${line+.}" ]
+            then
+                sed 1d "$playlist" | Sponge "$playlist"
+                case $line in
+                ('')
+                    exit
+                    ;;
+                (/*)
+                    song=$line
+                    printf '%s\n' "$song" > "$cursongfile"
+                    ;;
+                (%*)
+                    song="${line#%}"
+                    printf '%s\n' "$song" > "$cursongfile"
+                    ;;
+                (!*)
+                    eval "${line#!}"
+                    continue
+                    ;;
+                (*)
+                    Complain wtf
+                    continue
+                esac
+            fi
+
+            Play "$song"; s=$?
+            prevsong=song
+            unset song
+            > "$cursongfile"
+            if [ "$exitonerror" ]
+            then
+                if [ $s -ne 0 ]
+                then
+                    Complain "player exited with status $s"
+                    exit 1
+                fi
+            fi
+            # So we don't sleep unnecessarily
+            if LineOneEmpty "$playlist" && ! IsLooping
+            then
+                sed 1d "$playlist" | Sponge "$playlist"
+                exit
+            fi
+            read -r delay < "$delayfile"
+            sleep "$delay" &
+            spid=$!
+            echo $spid > "$sleeppidfile"
+            wait $spid
+            > "$sleeppidfile"
+        done
+    ) &
+    echo $! > "$pidfile"
+    ;;
+(p|pl|play)
+    # This command works like 'add' but turns into
+    # "clear add <arguments> $argterm run", except:
+    # When used with no arguments nor terminating $argterm,
+    # (i.e. is last CLI arg) it turns into "run"
+    case "$#" in
+    (0) set -- run ;;
+    (*)
+        VerifyIsNotRunning
+        first=true
+        replace=true
+        for arg
+        do
+            $first && set -- clear add; first=false
+            if [ "$arg" = "$argterm" ] && $replace
+            then set -- "$@" "$argterm" run; replace=false
+            else set -- "$@" "$arg"
+            fi
+        done
+        $replace && set -- "$@" "$argterm" run
+    esac
+    ;;
+
+# Manipulate the behaviour of a running instance
+(re|rep|repeat|repl|replay)
+    VerifyIsRunning
+    { cat -- "$cursongfile"
+      sed '1{/./!d;}' "$playlist"
+    } | Sponge "$playlist"
+    ;;
+(sk|skip)
+    read -r song < "$cursongfile"
+    if [ "$song" ]
+    then
+        KillPlayer
+    else
+        Say 'media player not running'
+    fi
+    ;;
+(sd|skd|skipdelay)
+    read -r spid < "$sleeppidfile"
+    if [ "$spid" ]
+    then
+        VerifyIsRunning
+        kill $spid
+    else
+        Say 'not sleeping'
+    fi
+    ;;
+(s|st|stop)
+    # Stop when current song finishes
+    VerifyIsRunning
+    if IsLooping
+    then set -- pause "$@"
+    else
+        if LineOneEmpty "$playlist"
+        then Say 'already about to stop'
+        else { echo; cat -- "$playlist"; } | Sponge "$playlist"
+        fi
+    fi
+    ;;
+(ns|nost|nostop|ds|donst|dontstop)
+    # Reverse a stop command
+    VerifyIsRunning
+    LineOneEmpty "$playlist" || continue
+    sed 1d "$playlist" | Sponge "$playlist"
+    ;;
+(n|ne|nx|nxt|next)
+    # While looping, move to next song when current finishes
+    VerifyIsRunning
+    IsLooping || {
+        Complain 'not looping'
+        exit 1
+    }
+    >> "$nexter"
+    ;;
+(k|kill)
+    VerifyIsRunning
+    if LineOneEmpty "$playlist"
+    then set -- skip "$@"
+    else set -- stop skip "$@"
+    fi
+    ;;
+
+(h|help|-h|-help|--help|-\?) Usage ;;
+
+(*)
+    Complain 'unrecognized command'
+    exit 1
+
+esac done
