@@ -137,17 +137,43 @@ GetPL ()
 
 umask 0022
     
-# Config
-. "${SHELLPLAYER_CONFIG:-$HOME_CONFIG/shellplayer/config}" || exit
-
-# Ensure sane path-name.
-case $playlist in (/*) ;; (*) playlist=./$playlist; esac
-
 progname=shellplayer
 
 # Word used to terminate variable-length argument lists to commands
 # E.g. if it's "-": shellplayer add one.ogg two.ogg three.ogg - run
 argterm=-
+
+# Config
+. "${SHELLPLAYER_CONFIG:-$HOME_CONFIG/shellplayer/config}" || exit
+
+# Ensure sane path-name.
+case $tmpdir in (/*) ;; (*) tmpdir=./$tmpdir; esac
+
+cursongfile=$tmpdir/current
+playlist=$tmpdir/playlist
+pidfile=$tmpdir/pid
+playerpidfile=$tmpdir/playerpid
+sleeppidfile=$tmpdir/sleeppid
+spongefile=$tmpdir/sponge
+looper=$tmpdir/looper
+nexter=$tmpdir/nexter
+
+for dir in "$tmpdir" "$plsavedir"
+do
+    mkdir -p -- "$dir" || {
+        Complain "could not create directory: $dir"
+        exit 1
+    }
+done
+
+for file in "$cursongfile" "$playlist" "$delayfile" "$pidfile" \
+            "$sleeppidfile" "$spongefile"
+do
+    >> "$file" || {
+        Complain "could not create file: $file"
+        exit 1
+    }
+done
 
 if [ $(find "$playlist" ! -user "$USER" 2> /dev/null | wc -l) -ne 0 ]
 then
@@ -161,32 +187,6 @@ then
     Complain "your playlist is writable by others: $playlist"
     exit 1
 fi
-
-for dir in "$tmpdir" "$plsavedir"
-do
-    mkdir -p -- "$dir" || {
-        Complain "could not create directory: $dir"
-        exit 1
-    }
-done
-
-cursongfile=$tmpdir/current
-playlist=$tmpdir/playlist
-pidfile=$tmpdir/pid
-playerpidfile=$tmpdir/playerpid
-sleeppidfile=$tmpdir/sleeppid
-spongefile=$tmpdir/sponge
-looper=$tmpdir/looper
-nexter=$tmpdir/nexter
-
-for file in "$cursongfile" "$playlist" "$delayfile" "$pidfile" \
-            "$sleeppidfile" "$spongefile"
-do
-    >> "$file" || {
-        Complain "could not create file: $file"
-        exit 1
-    }
-done
 
 
 # MAIN
@@ -378,8 +378,7 @@ do case $cmd in
     VerifyNotEmpty "$playlist"
     VerifyIsNotRunning
     (
-        # Close output to prevent blocking IO, reopen just in case
-        exec >&- 2>&-
+        # Redirect output to prevent blocking IO
         exec > /dev/null 2>&1
         unset prevsong song spid
         trap CleanUp EXIT
