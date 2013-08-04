@@ -382,7 +382,7 @@ do case $cmd in
         exec > /dev/null 2>&1
         unset prevsong song spid
         trap CleanUp EXIT
-        trap '[ "$song" ] && KillPlayer; exit 1' INT TERM
+        trap '[ "$song" ] && KillPlayer; CleanUp; exit 1' INT TERM
         while true
         do
             unset line
